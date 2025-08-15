@@ -138,6 +138,32 @@ class WorkflowSummary:
             return (error_message,)
 
     def _find_node_license(self, node_type, node_paths):
+        # Dynamically extract native ComfyUI node class names from nodes.py
+        native_nodes_path = os.path.expanduser("~/ComfyUI/nodes.py")
+        native_node_types = set()
+        try:
+            with open(native_nodes_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            in_dict = False
+            for line in lines:
+                if "NODE_CLASS_MAPPINGS" in line and "=" in line and "{" in line:
+                    in_dict = True
+                    continue
+                if in_dict:
+                    if "}" in line:
+                        break
+                    # Extract key before colon, strip quotes and whitespace
+                    if ":" in line:
+                        key = line.split(":")[0].strip().strip('"').strip("'")
+                        if key:
+                            native_node_types.add(key)
+        except Exception as e:
+            # Fallback: treat as no native nodes found
+            native_node_types = set()
+
+        if node_type in native_node_types:
+            return "ComfyUI Native (MIT License)"
+
         node_path = node_paths.get(node_type)
         if not node_path:
             return "Unknown"
