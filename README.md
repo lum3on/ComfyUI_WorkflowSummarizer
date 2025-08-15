@@ -49,4 +49,4 @@ This custom node for [ComfyUI](https://github.com/comfyanonymous/ComfyUI) genera
 
 ## License
 
-MIT (for this node). See ComfyUI and model licenses for their respective terms.
+Apache 2.0 (for this node). See ComfyUI and model licenses for their respective terms.
