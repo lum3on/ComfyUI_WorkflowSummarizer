@@ -37,6 +37,10 @@ class WorkflowSummary:
         return {
             "required": {
                 "output_folder": ("STRING", {"default": ""}),
+                "report_type": (["Full Report (Nodes + Licenses)", "Licenses Only"], {"default": "Full Report (Nodes + Licenses)"}),
+                "workflow_version": ("STRING", {"default": "1.0"}),
+                "workflow_author": ("STRING", {"default": ""}),
+                "include_all_installed_nodes": ("BOOLEAN", {"default": True}),
             },
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -45,76 +49,76 @@ class WorkflowSummary:
     FUNCTION = "export_summary"
     CATEGORY = "utils"
 
-    def export_summary(self, output_folder="", prompt=None, extra_pnginfo=None):
+    def export_summary(self, output_folder="", report_type="Full Report (Nodes + Licenses)",
+                      workflow_version="1.0", workflow_author="", include_all_installed_nodes=True,
+                      prompt=None, extra_pnginfo=None):
         try:
             if not prompt:
                 return ("This node requires an active workflow to summarize. Please run a workflow to see the summary.",)
 
-            # Load node paths on demand for a stateless execution
+            # Enhanced node detection - get ALL installed nodes
             scanner = NodeLicenseScanner()
-            node_paths = scanner.get_node_paths()
 
-            summary = {"nodes": [], "models": []}
-            
-            # Process the current workflow directly from the prompt
+            if include_all_installed_nodes:
+                all_installed_nodes = scanner.get_all_installed_nodes()
+                print(f"WorkflowSummary: Found {len(all_installed_nodes)} total installed nodes")
+            else:
+                # Legacy mode - only custom nodes
+                node_paths = scanner.get_node_paths()
+                all_installed_nodes = {}
+
+            summary = {
+                "workflow_nodes": [],  # Nodes used in this workflow
+                "all_installed_nodes": all_installed_nodes,  # ALL installed nodes
+                "models": [],
+                "metadata": {
+                    "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "version": workflow_version,
+                    "author": workflow_author,
+                    "report_type": report_type
+                }
+            }
+
+            # Process the current workflow nodes
             for node_id, node_info in prompt.items():
                 node_type = node_info['class_type']
-                license_info = self._find_node_license(node_type, node_paths)
-                
-                summary["nodes"].append({
+
+                # Get license info from comprehensive node database or fallback
+                if node_type in all_installed_nodes:
+                    license_info = all_installed_nodes[node_type]['license']
+                    node_category = all_installed_nodes[node_type].get('category', 'unknown')
+                else:
+                    # Fallback for nodes not in our database
+                    license_info = self._find_node_license_legacy(node_type, scanner.get_node_paths())
+                    node_category = 'unknown'
+
+                summary["workflow_nodes"].append({
                     "id": node_id,
                     "type": node_type,
-                    "license": license_info
+                    "license": license_info,
+                    "category": node_category
                 })
 
+                # Enhanced model detection - detect ALL model types
                 if "inputs" in node_info:
                     inputs = node_info["inputs"]
-                    model_name = next((inputs[key] for key in ["ckpt_name", "model_name", "lora_name"] if key in inputs), None)
-                    if model_name and not any(m['name'] == model_name for m in summary['models']):
-                        lic = self._load_license(model_name)
-                        summary["models"].append({"name": model_name, "license": lic})
+                    detected_models = self._detect_all_model_types(inputs, node_type)
+
+                    for model_info in detected_models:
+                        model_name = model_info['name']
+                        if not any(m['name'] == model_name for m in summary['models']):
+                            lic = self._load_license(model_name)
+                            summary["models"].append({
+                                "name": model_name,
+                                "license": lic,
+                                "type": model_info['type'],
+                                "node_type": node_type
+                            })
             
             image_data = self._get_output_image_data(prompt, extra_pnginfo)
 
-            # --- PDF Generation ---
-            pdf = PDF()
-            pdf.add_page()
-            pdf.set_title('Workflow & Asset Report')
-
-            pdf.chapter_title('Nodes & Licenses')
-            node_lines = [f"ID: {node['id']}, Type: {node['type']}\nLicense: {node['license']}" for node in summary["nodes"]]
-            pdf.chapter_body(node_lines)
-
-            if summary["models"]:
-                pdf.chapter_title('Models & Licenses')
-                model_lines = [f"Name: {m['name']}, License: {m['license']}" for m in summary["models"]]
-                pdf.chapter_body(model_lines)
-    
-            if image_data:
-                pdf.chapter_title('Generated Images & Prompts')
-                for img_info in image_data:
-                    img_path = img_info['path']
-                    prompt_text = img_info.get('prompt', 'N/A')
-                    negative_prompt_text = img_info.get('negative_prompt', 'N/A')
-
-                    pdf.set_font('Arial', 'B', 10)
-                    pdf.cell(0, 5, f"Image: {os.path.basename(img_path)}", 0, 1)
-                    pdf.set_font('Arial', '', 9)
-                    
-                    # Calculate available width for multi_cell
-                    available_width = pdf.w - pdf.l_margin - pdf.r_margin
-                    
-                    pdf.multi_cell(available_width, 4, f"Prompt: {prompt_text}")
-                    pdf.multi_cell(available_width, 4, f"Negative Prompt: {negative_prompt_text}")
-                    pdf.ln(2)
-
-                    try:
-                        # Ensure image width also respects margins
-                        image_width = pdf.w - 2 * pdf.l_margin
-                        pdf.image(img_path, w=image_width)
-                        pdf.ln(5)
-                    except Exception as e:
-                        pdf.chapter_body([f"Could not embed image {os.path.basename(img_path)}: {e}"])
+            # --- Enhanced PDF Generation ---
+            pdf = self._generate_enhanced_pdf(summary, image_data, report_type)
 
             # --- Save the PDF ---
             # Determine the output directory
@@ -136,6 +140,210 @@ class WorkflowSummary:
             error_message = f"An error occurred in WorkflowSummary: {str(e)}\n\n{traceback.format_exc()}"
             print(error_message)
             return (error_message,)
+
+    def _detect_all_model_types(self, inputs, node_type):
+        """
+        Enhanced model detection - detects ALL model types, not just 3.
+        Addresses maintainer requirement: "detect all types of models"
+        """
+        detected_models = []
+
+        # Comprehensive model type mapping
+        model_patterns = {
+            # Checkpoints
+            "ckpt_name": "checkpoint",
+            "model_name": "checkpoint",
+            "checkpoint": "checkpoint",
+
+            # LoRA models
+            "lora_name": "lora",
+            "lora": "lora",
+            "lycoris_name": "lycoris",
+
+            # ControlNet models
+            "control_net_name": "controlnet",
+            "controlnet": "controlnet",
+            "control_net": "controlnet",
+
+            # VAE models
+            "vae_name": "vae",
+            "vae": "vae",
+
+            # Upscaler models
+            "upscale_model": "upscaler",
+            "model": "upscaler",  # Context-dependent
+
+            # Embedding/Textual Inversion
+            "embedding": "embedding",
+            "textual_inversion": "embedding",
+
+            # Face restoration
+            "face_restore_model": "face_restoration",
+            "gfpgan_model": "face_restoration",
+
+            # Other model types
+            "clip_name": "clip",
+            "unet_name": "unet",
+            "sampler_name": "sampler",
+        }
+
+        for input_key, input_value in inputs.items():
+            if isinstance(input_value, str) and input_value.strip():
+                # Check if this input matches any model pattern
+                for pattern, model_type in model_patterns.items():
+                    if pattern in input_key.lower():
+                        # Special handling for context-dependent types
+                        if pattern == "model" and node_type:
+                            if "upscale" in node_type.lower():
+                                model_type = "upscaler"
+                            elif "controlnet" in node_type.lower():
+                                model_type = "controlnet"
+                            elif "face" in node_type.lower():
+                                model_type = "face_restoration"
+
+                        detected_models.append({
+                            "name": input_value,
+                            "type": model_type,
+                            "input_key": input_key
+                        })
+                        break
+
+        return detected_models
+
+    def _generate_enhanced_pdf(self, summary, image_data, report_type):
+        """
+        Enhanced PDF generation with metadata, license legend, and report type options.
+        Addresses maintainer requirements for metadata and license legend.
+        """
+        pdf = PDF()
+        pdf.add_page()
+        pdf.set_title('Enhanced Workflow & Asset Report')
+
+        # --- Header with Metadata ---
+        pdf.chapter_title('Report Information')
+        metadata_lines = [
+            f"Generated: {summary['metadata']['date']}",
+            f"Workflow Version: {summary['metadata']['version']}",
+            f"Author: {summary['metadata']['author'] or 'Not specified'}",
+            f"Report Type: {summary['metadata']['report_type']}"
+        ]
+        pdf.chapter_body(metadata_lines)
+
+        # --- License Legend ---
+        pdf.chapter_title('License Legend')
+        legend_lines = self._get_license_legend()
+        pdf.chapter_body(legend_lines)
+
+        if report_type == "Full Report (Nodes + Licenses)":
+            # --- All Installed Nodes Section ---
+            if summary.get('all_installed_nodes'):
+                pdf.chapter_title(f'All Installed Nodes ({len(summary["all_installed_nodes"])} total)')
+
+                # Group by type
+                core_nodes = [n for n in summary['all_installed_nodes'].values() if n['type'] == 'core']
+                custom_nodes = [n for n in summary['all_installed_nodes'].values() if n['type'] == 'custom']
+
+                if core_nodes:
+                    pdf.set_font('Arial', 'B', 11)
+                    pdf.cell(0, 8, f'ComfyUI Core Nodes ({len(core_nodes)})', 0, 1)
+                    pdf.set_font('Arial', '', 9)
+
+                    core_lines = []
+                    for node in sorted(core_nodes, key=lambda x: x['name']):
+                        core_lines.append(f"• {node['name']} ({node.get('category', 'unknown')}) - {node['license']}")
+                    pdf.chapter_body(core_lines)
+
+                if custom_nodes:
+                    pdf.set_font('Arial', 'B', 11)
+                    pdf.cell(0, 8, f'Custom Nodes ({len(custom_nodes)})', 0, 1)
+                    pdf.set_font('Arial', '', 9)
+
+                    custom_lines = []
+                    for node in sorted(custom_nodes, key=lambda x: x['name']):
+                        package = node.get('package', 'unknown')
+                        custom_lines.append(f"• {node['name']} ({node.get('category', 'unknown')}) - Package: {package}")
+                    pdf.chapter_body(custom_lines)
+
+            # --- Workflow Nodes Section ---
+            pdf.chapter_title(f'Nodes Used in This Workflow ({len(summary["workflow_nodes"])})')
+            workflow_lines = []
+            for node in summary["workflow_nodes"]:
+                workflow_lines.append(f"ID: {node['id']}, Type: {node['type']} ({node.get('category', 'unknown')})")
+                workflow_lines.append(f"License: {node['license']}")
+                workflow_lines.append("")  # Empty line for spacing
+            pdf.chapter_body(workflow_lines)
+
+        # --- Models & Licenses Section (always included) ---
+        if summary["models"]:
+            pdf.chapter_title(f'Models & Licenses ({len(summary["models"])} total)')
+
+            # Group models by type
+            models_by_type = {}
+            for model in summary["models"]:
+                model_type = model.get('type', 'unknown')
+                if model_type not in models_by_type:
+                    models_by_type[model_type] = []
+                models_by_type[model_type].append(model)
+
+            for model_type, models in sorted(models_by_type.items()):
+                pdf.set_font('Arial', 'B', 10)
+                pdf.cell(0, 6, f'{model_type.title()} Models ({len(models)})', 0, 1)
+                pdf.set_font('Arial', '', 9)
+
+                model_lines = []
+                for model in sorted(models, key=lambda x: x['name']):
+                    model_lines.append(f"• {model['name']}")
+                    model_lines.append(f"  License: {model['license']}")
+                    model_lines.append(f"  Used in: {model.get('node_type', 'unknown')} node")
+                    model_lines.append("")  # Spacing
+                pdf.chapter_body(model_lines)
+
+        # --- Generated Images & Prompts (only in full report) ---
+        if report_type == "Full Report (Nodes + Licenses)" and image_data:
+            pdf.chapter_title('Generated Images & Prompts')
+            for img_info in image_data:
+                img_path = img_info['path']
+                prompt_text = img_info.get('prompt', 'N/A')
+                negative_prompt_text = img_info.get('negative_prompt', 'N/A')
+
+                pdf.set_font('Arial', 'B', 10)
+                pdf.cell(0, 5, f"Image: {os.path.basename(img_path)}", 0, 1)
+                pdf.set_font('Arial', '', 9)
+
+                # Calculate available width for multi_cell
+                available_width = pdf.w - pdf.l_margin - pdf.r_margin
+
+                pdf.multi_cell(available_width, 4, f"Prompt: {prompt_text}")
+                pdf.multi_cell(available_width, 4, f"Negative Prompt: {negative_prompt_text}")
+                pdf.ln(2)
+
+                try:
+                    # Ensure image width also respects margins
+                    image_width = pdf.w - 2 * pdf.l_margin
+                    pdf.image(img_path, w=image_width)
+                    pdf.ln(5)
+                except Exception as e:
+                    pdf.chapter_body([f"Could not embed image {os.path.basename(img_path)}: {e}"])
+
+        return pdf
+
+    def _get_license_legend(self):
+        """Generate license legend explaining common licenses"""
+        return [
+            "MIT License: Permissive license allowing commercial use with attribution",
+            "Apache-2.0: Permissive license with patent protection",
+            "CreativeML Open RAIL-M: Responsible AI license with usage restrictions",
+            "CreativeML Open RAIL++-M: Enhanced responsible AI license",
+            "BSD-3-Clause: Permissive license similar to MIT",
+            "GPL-3.0: Copyleft license requiring derivative works to be open source",
+            "Unknown: License information not available or could not be determined",
+            "",
+            "Note: Always verify license terms before commercial use."
+        ]
+
+    def _find_node_license_legacy(self, node_type, node_paths):
+        """Legacy method for finding node licenses when not in comprehensive database"""
+        return self._find_node_license(node_type, node_paths)
 
     def _find_node_license(self, node_type, node_paths):
         # Dynamically extract native ComfyUI node class names from nodes.py
