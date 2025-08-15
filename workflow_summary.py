@@ -8,23 +8,31 @@ from .scanner import NodeLicenseScanner
 
 # --- 1. Custom PDF Class for Styling ---
 class PDF(FPDF):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Register system Unicode font for full Unicode support (fixes bullet "•" error)
+        self.add_font('HelveticaUnicode', '', '/System/Library/Fonts/Helvetica.ttc', uni=True)
+        self.add_font('HelveticaUnicode', 'B', '/System/Library/Fonts/Helvetica.ttc', uni=True)
+        self.add_font('HelveticaUnicode', 'I', '/System/Library/Fonts/Helvetica.ttc', uni=True)
+        self.add_font('HelveticaUnicode', 'BI', '/System/Library/Fonts/Helvetica.ttc', uni=True)
+
     def header(self):
-        self.set_font('Arial', 'B', 16)
+        self.set_font('HelveticaUnicode', 'B', 16)
         self.cell(0, 10, 'Workflow & Asset Report', 0, 1, 'C')
         self.ln(10)
 
     def footer(self):
         self.set_y(-15)
-        self.set_font('Arial', 'I', 8)
+        self.set_font('HelveticaUnicode', 'I', 8)
         self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
 
     def chapter_title(self, title):
-        self.set_font('Arial', 'B', 12)
+        self.set_font('HelveticaUnicode', 'B', 12)
         self.cell(0, 10, title, 0, 1, 'L')
         self.ln(2)
 
     def chapter_body(self, text_lines):
-        self.set_font('Arial', '', 10)
+        self.set_font('HelveticaUnicode', '', 10)
         for line in text_lines:
             # Use write() for more robust line breaking
             self.write(5, line + '\n')
@@ -40,7 +48,7 @@ class WorkflowSummary:
                 "report_type": (["Full Report (Nodes + Licenses)", "Licenses Only"], {"default": "Full Report (Nodes + Licenses)"}),
                 "workflow_version": ("STRING", {"default": "1.0"}),
                 "workflow_author": ("STRING", {"default": ""}),
-                "include_all_installed_nodes": ("BOOLEAN", {"default": True}),
+                "include_all_installed_nodes": ("BOOLEAN", {"default": False}),
             },
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -244,9 +252,9 @@ class WorkflowSummary:
                 custom_nodes = [n for n in summary['all_installed_nodes'].values() if n['type'] == 'custom']
 
                 if core_nodes:
-                    pdf.set_font('Arial', 'B', 11)
+                    pdf.set_font('HelveticaUnicode', 'B', 11)
                     pdf.cell(0, 8, f'ComfyUI Core Nodes ({len(core_nodes)})', 0, 1)
-                    pdf.set_font('Arial', '', 9)
+                    pdf.set_font('HelveticaUnicode', '', 9)
 
                     core_lines = []
                     for node in sorted(core_nodes, key=lambda x: x['name']):
@@ -254,9 +262,9 @@ class WorkflowSummary:
                     pdf.chapter_body(core_lines)
 
                 if custom_nodes:
-                    pdf.set_font('Arial', 'B', 11)
+                    pdf.set_font('HelveticaUnicode', 'B', 11)
                     pdf.cell(0, 8, f'Custom Nodes ({len(custom_nodes)})', 0, 1)
-                    pdf.set_font('Arial', '', 9)
+                    pdf.set_font('HelveticaUnicode', '', 9)
 
                     custom_lines = []
                     for node in sorted(custom_nodes, key=lambda x: x['name']):
@@ -286,9 +294,9 @@ class WorkflowSummary:
                 models_by_type[model_type].append(model)
 
             for model_type, models in sorted(models_by_type.items()):
-                pdf.set_font('Arial', 'B', 10)
+                pdf.set_font('HelveticaUnicode', 'B', 10)
                 pdf.cell(0, 6, f'{model_type.title()} Models ({len(models)})', 0, 1)
-                pdf.set_font('Arial', '', 9)
+                pdf.set_font('HelveticaUnicode', '', 9)
 
                 model_lines = []
                 for model in sorted(models, key=lambda x: x['name']):
@@ -306,9 +314,9 @@ class WorkflowSummary:
                 prompt_text = img_info.get('prompt', 'N/A')
                 negative_prompt_text = img_info.get('negative_prompt', 'N/A')
 
-                pdf.set_font('Arial', 'B', 10)
+                pdf.set_font('HelveticaUnicode', 'B', 10)
                 pdf.cell(0, 5, f"Image: {os.path.basename(img_path)}", 0, 1)
-                pdf.set_font('Arial', '', 9)
+                pdf.set_font('HelveticaUnicode', '', 9)
 
                 # Calculate available width for multi_cell
                 available_width = pdf.w - pdf.l_margin - pdf.r_margin
@@ -380,21 +388,37 @@ class WorkflowSummary:
             search_dir = os.path.dirname(node_path)
             # Limit search to the custom_nodes directory
             custom_nodes_root = folder_paths.get_folder_paths("custom_nodes")[0]
-
-            for _ in range(5): # Search up to 5 parent directories
-                for filename in os.listdir(search_dir):
+    
+            for i in range(5): # Search up to 5 parent directories
+                print(f"[LicenseTraversal] Checking directory: {search_dir} (level {i+1})")
+                try:
+                    files_in_dir = os.listdir(search_dir)
+                    print(f"[LicenseTraversal] Files in {search_dir}: {files_in_dir}")
+                except Exception as e:
+                    print(f"[LicenseTraversal] Could not list files in {search_dir}: {e}")
+                    break
+    
+                for filename in files_in_dir:
                     if filename.lower() in ('license', 'license.md', 'license.txt'):
+                        print(f"[LicenseTraversal] Found license file: {filename} in {search_dir}")
                         with open(os.path.join(search_dir, filename), 'r', encoding='utf-8') as f:
                             # Return the first line of the license
                             return f.readline().strip()
                 
                 if search_dir == custom_nodes_root:
+                    print(f"[LicenseTraversal] Reached custom_nodes_root: {custom_nodes_root}, stopping traversal.")
                     break
-                search_dir = os.path.dirname(search_dir)
-
+                parent_dir = os.path.dirname(search_dir)
+                if parent_dir == search_dir:
+                    print(f"[LicenseTraversal] Reached filesystem root at {search_dir}, stopping traversal.")
+                    break
+                search_dir = parent_dir
+    
         except Exception as e:
+            print(f"[LicenseTraversal] Exception during traversal: {e}")
             return f"Error finding license: {e}"
-            
+                
+        print(f"[LicenseTraversal] License not found for node_type: {node_type}")
         return "Not Found"
 
     def _get_output_image_data(self, prompt, extra_pnginfo):
