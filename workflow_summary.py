@@ -328,11 +328,133 @@ class WorkflowSummary:
         return prompts
 
     def _load_license(self, model_name):
+        import requests
+
+        def debug(msg):
+            print(f"[WorkflowSummary][LicenseLookup] {msg}")
+
+        # 1. Try local mapping
         path = os.path.join(os.path.dirname(__file__), "model_licenses.json")
         try:
             with open(path, 'r') as f:
                 data = json.load(f)
             base_model_name = os.path.basename(model_name)
-            return data.get(base_model_name, data.get(model_name, "unknown"))
-        except FileNotFoundError:
-            return "model_licenses.json not found"
+            license_val = data.get(base_model_name, data.get(model_name))
+            debug(f"Local mapping: {base_model_name} -> {license_val}")
+            if license_val:
+                return license_val
+        except Exception as e:
+            debug(f"Local mapping exception: {e}")
+
+        # 2. Try HuggingFace direct repo_id lookup
+        def try_hf_lookup(repo_id):
+            url = f"https://huggingface.co/api/models/{repo_id}"
+            debug(f"Trying HuggingFace direct lookup: {url}")
+            try:
+                resp = requests.get(url, timeout=5)
+                debug(f"Direct lookup status: {resp.status_code}")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    debug(f"Direct lookup result: {data.get('license', None)}")
+                    return data.get("license", None)
+            except Exception as e:
+                debug(f"Direct lookup exception: {e}")
+            return None
+
+        # 2a. Try direct lookup by filename (legacy, may fail)
+        repo_id = os.path.splitext(os.path.basename(model_name))[0]
+        license_val = try_hf_lookup(repo_id)
+        if license_val:
+            debug(f"Direct HuggingFace license found: {license_val}")
+            return f"HuggingFace: {license_val}"
+
+        # 2b. Try HuggingFace search API if direct lookup fails
+        def try_hf_search(model_name):
+            import re
+            base_name = os.path.splitext(os.path.basename(model_name))[0]
+            alphanum = re.sub(r'[^a-zA-Z0-9]', '', base_name)
+            search_key = alphanum[:6] if len(alphanum) >= 6 else alphanum
+            url = f"https://huggingface.co/api/models?search={search_key}"
+            debug(f"Trying HuggingFace search: {url}")
+            try:
+                resp = requests.get(url, timeout=5)
+                debug(f"Search status: {resp.status_code}")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    debug(f"Search results: {[repo.get('modelId') for repo in data]}")
+                    if isinstance(data, list) and data:
+                        def score(repo):
+                            rid = repo.get("modelId", "").lower()
+                            if base_name.lower() in rid:
+                                return 2
+                            if rid.startswith(search_key.lower()):
+                                return 1
+                            return 0
+                        best = max(data, key=score)
+                        repo_id = best.get("modelId")
+                        debug(f"Best match repo_id: {repo_id}")
+                        if repo_id:
+                            license_val = try_hf_lookup(repo_id)
+                            if license_val:
+                                debug(f"Search HuggingFace license found: {license_val}")
+                                return f"HuggingFace: {license_val} (from search: {repo_id})"
+                            # If not found, try to get license from model card metadata (more robust)
+                            url_meta = f"https://huggingface.co/api/models/{repo_id}"
+                            try:
+                                resp_meta = requests.get(url_meta, timeout=5)
+                                debug(f"Meta lookup status: {resp_meta.status_code}")
+                                if resp_meta.status_code == 200:
+                                    meta = resp_meta.json()
+                                    # Try to find license in meta fields
+                                    for k in ["license", "cardData", "modelCardData"]:
+                                        if k in meta and meta[k]:
+                                            if isinstance(meta[k], dict):
+                                                # Look for license in nested dict
+                                                for subk in ["license", "license_name"]:
+                                                    if subk in meta[k] and meta[k][subk]:
+                                                        debug(f"Meta nested license found: {meta[k][subk]}")
+                                                        return f"HuggingFace: {meta[k][subk]} (from meta: {repo_id})"
+                                            elif isinstance(meta[k], str):
+                                                debug(f"Meta license found: {meta[k]}")
+                                                return f"HuggingFace: {meta[k]} (from meta: {repo_id})"
+                            except Exception as e:
+                                debug(f"Meta lookup exception: {e}")
+            except Exception as e:
+                debug(f"Search exception: {e}")
+            return None
+
+        license_val = try_hf_search(model_name)
+        if license_val:
+            return license_val
+
+        # 3. Try CivitAI API
+        def try_civitai_lookup(model_name):
+            civitai_name = os.path.splitext(os.path.basename(model_name))[0]
+            url = f"https://civitai.com/api/v1/models?query={civitai_name}"
+            debug(f"Trying CivitAI lookup: {url}")
+            try:
+                resp = requests.get(url, timeout=5)
+                debug(f"CivitAI status: {resp.status_code}")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    debug(f"CivitAI results: {data.get('items', [])}")
+                    if "items" in data and data["items"]:
+                        item = data["items"][0]
+                        if "modelVersions" in item and item["modelVersions"]:
+                            mv = item["modelVersions"][0]
+                            if "license" in mv and mv["license"]:
+                                debug(f"CivitAI license found: {mv['license']}")
+                                return f"CivitAI: {mv['license']}"
+                        if "license" in item and item["license"]:
+                            debug(f"CivitAI license found: {item['license']}")
+                            return f"CivitAI: {item['license']}"
+            except Exception as e:
+                debug(f"CivitAI exception: {e}")
+            return None
+
+        license_val = try_civitai_lookup(model_name)
+        if license_val:
+            return license_val
+
+        debug("No license found, returning 'unknown'")
+        return "unknown"
